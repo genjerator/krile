@@ -18,13 +18,13 @@ func NewJSONWriter(w io.Writer) *JSONWriter {
 	return &JSONWriter{enc: enc}
 }
 
-func (w *JSONWriter) Write(businesses []models.Business) error {
+func (w *JSONWriter) Write(businesses []models.Business) (int, error) {
 	for _, b := range businesses {
 		if err := w.enc.Encode(b); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(businesses), nil
 }
 
 func (w *JSONWriter) Flush() error { return nil }

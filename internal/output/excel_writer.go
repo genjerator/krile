@@ -36,7 +36,7 @@ func NewExcelWriter(dest string) *ExcelWriter {
 	return w
 }
 
-func (w *ExcelWriter) Write(businesses []models.Business) error {
+func (w *ExcelWriter) Write(businesses []models.Business) (int, error) {
 	for _, b := range businesses {
 		values := []interface{}{
 			b.Name,
@@ -56,7 +56,7 @@ func (w *ExcelWriter) Write(businesses []models.Business) error {
 		}
 		w.row++
 	}
-	return nil
+	return len(businesses), nil
 }
 
 func (w *ExcelWriter) Flush() error {

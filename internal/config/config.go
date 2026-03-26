@@ -11,10 +11,11 @@ type Config struct {
 	Debug   bool
 
 	// PostgreSQL parameters
-	DBHost     string
-	DBPort     int
-	DBName     string
-	DBUser     string
-	DBPassword string
-	DBTable    string
+	DBHost         string
+	DBPort         int
+	DBName         string
+	DBUser         string
+	DBPassword     string
+	DBTable        string
+	UpdateExisting bool // Update records with same source_url instead of skipping
 }

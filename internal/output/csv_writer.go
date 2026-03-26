@@ -22,10 +22,10 @@ var csvHeader = []string{
 	"phone", "website", "email", "source_url", "scraped_at",
 }
 
-func (c *CSVWriter) Write(businesses []models.Business) error {
+func (c *CSVWriter) Write(businesses []models.Business) (int, error) {
 	if !c.wroteHdr {
 		if err := c.w.Write(csvHeader); err != nil {
-			return err
+			return 0, err
 		}
 		c.wroteHdr = true
 	}
@@ -43,10 +43,10 @@ func (c *CSVWriter) Write(businesses []models.Business) error {
 			b.ScrapedAt.Format("2006-01-02T15:04:05Z"),
 		}
 		if err := c.w.Write(row); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(businesses), nil
 }
 
 func (c *CSVWriter) Flush() error {

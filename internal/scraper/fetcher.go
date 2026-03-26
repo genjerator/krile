@@ -147,6 +147,38 @@ func (f *Fetcher) post(query, city string, position, anzahl int) (*AjaxResponse,
 	return &result, nil
 }
 
+// FetchDetailPage fetches a single detail page by URL
+func (f *Fetcher) FetchDetailPage(url string) (string, error) {
+	if !strings.HasPrefix(url, "http") {
+		url = "https://www.gelbeseiten.de" + url
+	}
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Referer", "https://www.gelbeseiten.de/")
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("detail page returned HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
+}
+
 func ts() string {
 	return time.Now().Format(time.RFC3339)
 }

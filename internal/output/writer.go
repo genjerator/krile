@@ -12,7 +12,7 @@ import (
 
 // Writer is implemented by JSON and CSV writers.
 type Writer interface {
-	Write(businesses []models.Business) error
+	Write(businesses []models.Business) (int, error)
 	Flush() error
 }
 
@@ -53,10 +53,10 @@ func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, error) {
 
 		tableName := cfg.DBTable
 		if tableName == "" {
-			tableName = "businesses"
+			tableName = "companies"
 		}
 
-		pgWriter, err := NewPostgresWriter(ctx, connString, tableName)
+		pgWriter, err := NewPostgresWriter(ctx, connString, tableName, cfg.UpdateExisting, cfg.Debug)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create postgres writer: %w", err)
 		}

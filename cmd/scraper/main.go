@@ -29,7 +29,7 @@ func main() {
 	dbName := getEnv("DB_NAME", "krile")
 	dbUser := getEnv("DB_USER", "postgres")
 	dbPassword := getEnv("DB_PASSWORD", "")
-	dbTable := getEnv("DB_TABLE", "businesses")
+	dbTable := getEnv("DB_TABLE", "companies")
 
 	flag.StringVar(&cfg.Query, "q", "", "Business category to search (e.g. \"Restaurant\") [required]")
 	flag.StringVar(&cfg.Query, "query", "", "Business category to search (e.g. \"Restaurant\") [required]")
@@ -55,6 +55,7 @@ func main() {
 	flag.StringVar(&cfg.DBUser, "db-user", dbUser, "PostgreSQL user (env: DB_USER)")
 	flag.StringVar(&cfg.DBPassword, "db-password", dbPassword, "PostgreSQL password (env: DB_PASSWORD)")
 	flag.StringVar(&cfg.DBTable, "db-table", dbTable, "PostgreSQL table name (env: DB_TABLE)")
+	flag.BoolVar(&cfg.UpdateExisting, "update-existing", false, "Update existing records with same source_url instead of skipping")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: krile [flags]\n\n")
@@ -69,12 +70,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "      --debug           Dump raw HTML and detailed debug info to stderr\n")
 		fmt.Fprintf(os.Stderr, "      --version         Print version and exit\n")
 		fmt.Fprintf(os.Stderr, "\nPostgreSQL flags (only needed when --format=postgres):\n")
-		fmt.Fprintf(os.Stderr, "  --db-host     string  Database host (env: DB_HOST, default: localhost)\n")
-		fmt.Fprintf(os.Stderr, "  --db-port     int     Database port (env: DB_PORT, default: 5432)\n")
-		fmt.Fprintf(os.Stderr, "  --db-name     string  Database name (env: DB_NAME, default: krile)\n")
-		fmt.Fprintf(os.Stderr, "  --db-user     string  Database user (env: DB_USER, default: postgres)\n")
-		fmt.Fprintf(os.Stderr, "  --db-password string  Database password (env: DB_PASSWORD)\n")
-		fmt.Fprintf(os.Stderr, "  --db-table    string  Table name (env: DB_TABLE, default: businesses)\n")
+		fmt.Fprintf(os.Stderr, "  --db-host          string  Database host (env: DB_HOST, default: localhost)\n")
+		fmt.Fprintf(os.Stderr, "  --db-port          int     Database port (env: DB_PORT, default: 5432)\n")
+		fmt.Fprintf(os.Stderr, "  --db-name          string  Database name (env: DB_NAME, default: krile)\n")
+		fmt.Fprintf(os.Stderr, "  --db-user          string  Database user (env: DB_USER, default: postgres)\n")
+		fmt.Fprintf(os.Stderr, "  --db-password      string  Database password (env: DB_PASSWORD)\n")
+		fmt.Fprintf(os.Stderr, "  --db-table         string  Table name (env: DB_TABLE, default: companies)\n")
+		fmt.Fprintf(os.Stderr, "  --update-existing          Update records with same source_url instead of skipping\n")
 		fmt.Fprintf(os.Stderr, "\nNote: Database credentials can be set in .env file\n")
 	}
 
