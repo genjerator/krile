@@ -11,7 +11,7 @@ import (
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
-	writer, closer, err := output.New(cfg.Format, cfg.Output)
+	writer, closer, err := output.New(ctx, cfg)
 	if err != nil {
 		return err
 	}

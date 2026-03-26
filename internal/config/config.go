@@ -9,4 +9,12 @@ type Config struct {
 	Delay   int
 	Verbose bool
 	Debug   bool
+
+	// PostgreSQL parameters
+	DBHost     string
+	DBPort     int
+	DBName     string
+	DBUser     string
+	DBPassword string
+	DBTable    string
 }
