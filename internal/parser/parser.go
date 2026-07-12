@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -107,6 +108,53 @@ func isEmailChar(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
 		(c >= '0' && c <= '9') || c == '@' || c == '.' ||
 		c == '-' || c == '_' || c == '+'
+}
+
+// contactKeywords are checked against both href and link text (lowercase).
+var contactKeywords = []string{"kontakt", "contact", "impressum", "imprint", "about", "uber-uns", "über-uns"}
+
+// FindContactPageURL scans the HTML for a contact/impressum link and returns
+// an absolute URL. baseURL is the page the HTML came from.
+func FindContactPageURL(html, baseURL string) string {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return ""
+	}
+
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+
+	var found string
+	doc.Find("a[href]").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+		href, _ := s.Attr("href")
+		text := strings.ToLower(strings.TrimSpace(s.Text()))
+		hrefLow := strings.ToLower(href)
+
+		for _, kw := range contactKeywords {
+			if strings.Contains(hrefLow, kw) || strings.Contains(text, kw) {
+				ref, err := url.Parse(href)
+				if err != nil {
+					continue
+				}
+				abs := base.ResolveReference(ref)
+				// stay on same host
+				if abs.Host == base.Host || abs.Host == "" {
+					found = abs.String()
+					return false
+				}
+			}
+		}
+		return true
+	})
+
+	return found
+}
+
+// ExtractEmailFromHTML is a generic email extractor for any HTML page.
+func ExtractEmailFromHTML(html string) string {
+	return ExtractEmailFromDetailPage(html)
 }
 
 func ParseDebug(html string, debug bool) ([]models.Business, error) {

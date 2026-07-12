@@ -18,7 +18,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	defer closer.Close()
 	defer writer.Flush()
 
-	fetcher, err := NewFetcher(ctx, cfg.Verbose, cfg.Debug)
+	fetcher, err := NewFetcher(ctx, cfg.Verbose, cfg.Debug, cfg.Delay, cfg.Distance)
 	if err != nil {
 		return fmt.Errorf("fetcher init: %w", err)
 	}
@@ -28,6 +28,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 	totalSkipped := 0
 	totalFetched := 0
 	totalWithEmail := 0
+	uniqueEmails := make(map[string]struct{})
 
 	err = fetcher.FetchPages(cfg.Query, cfg.City, cfg.Limit, func(html string) error {
 		businesses, err := parser.ParseDebug(html, cfg.Debug)
@@ -59,10 +60,31 @@ func Run(ctx context.Context, cfg config.Config) error {
 				email := parser.ExtractEmailFromDetailPage(detailHTML)
 				if email != "" {
 					businesses[i].Email = email
-					fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on detail page: %s\n",
-						businesses[i].Name, email)
+					uniqueEmails[email] = struct{}{}
+					fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on detail page: %s%s%s %s(#%d)%s\n",
+						businesses[i].Name,
+						colorBlue, email, colorReset,
+						colorRed, len(uniqueEmails), colorReset)
+				} else if businesses[i].Website != "" {
+					fmt.Fprintf(os.Stderr, "[INFO] %s: Trying website contact page: %s\n",
+						businesses[i].Name, businesses[i].Website)
+					wsEmail, err := fetcher.FindEmailOnWebsite(businesses[i].Website)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "[WARN] %s: website fetch failed: %v\n",
+							businesses[i].Name, err)
+					} else if wsEmail != "" {
+						businesses[i].Email = wsEmail
+						uniqueEmails[wsEmail] = struct{}{}
+						fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on website: %s%s%s %s(#%d)%s\n",
+							businesses[i].Name,
+							colorBlue, wsEmail, colorReset,
+							colorRed, len(uniqueEmails), colorReset)
+					} else {
+						fmt.Fprintf(os.Stderr, "[INFO] %s: No email found on website either\n",
+							businesses[i].Name)
+					}
 				} else {
-					fmt.Fprintf(os.Stderr, "[INFO] %s: No email found on detail page either\n",
+					fmt.Fprintf(os.Stderr, "[INFO] %s: No email found, no website available\n",
 						businesses[i].Name)
 				}
 			}
@@ -126,24 +148,30 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 
 	// Display final summary
+	withoutEmail := totalFetched - totalWithEmail
+	emailPct := 0.0
+	if totalFetched > 0 {
+		emailPct = float64(totalWithEmail) / float64(totalFetched) * 100
+	}
+
+	fmt.Fprintf(os.Stderr, "\n─────────────────────────────────────────\n")
+	fmt.Fprintf(os.Stderr, "  Total collected:    %d addresses\n", totalFetched)
+	fmt.Fprintf(os.Stderr, "  With email:         %s%d%s\n", colorBlue, totalWithEmail, colorReset)
+	fmt.Fprintf(os.Stderr, "  Unique emails:      %s%d%s\n", colorBlue, len(uniqueEmails), colorReset)
+	fmt.Fprintf(os.Stderr, "  Without email:      %d\n", withoutEmail)
+	fmt.Fprintf(os.Stderr, "  Email coverage:     %s%.1f%%%s\n", colorRed, emailPct, colorReset)
 	if cfg.Format == "postgres" {
 		tableName := cfg.DBTable
 		if tableName == "" {
 			tableName = "companies"
 		}
-		emailPercentage := 0.0
-		if totalFetched > 0 {
-			emailPercentage = float64(totalWithEmail) / float64(totalFetched) * 100
-		}
 		operation := "Inserted"
 		if cfg.UpdateExisting {
 			operation = "Inserted/Updated"
 		}
-		fmt.Fprintf(os.Stderr, "\n[SUMMARY] Fetched: %d records | %s: %d | Skipped: %d duplicates\n", totalFetched, operation, written, totalSkipped)
-		fmt.Fprintf(os.Stderr, "[SUMMARY] Email coverage: %d/%d records (%.1f%%) in %s table\n", totalWithEmail, totalFetched, emailPercentage, tableName)
-	} else if cfg.Verbose || cfg.Debug {
-		fmt.Fprintf(os.Stderr, "[INFO] %s finished — %d businesses total\n", ts(), written)
+		fmt.Fprintf(os.Stderr, "  %s:      %d (skipped %d duplicates) → %s\n", operation, written, totalSkipped, tableName)
 	}
+	fmt.Fprintf(os.Stderr, "─────────────────────────────────────────\n")
 
 	return nil
 }

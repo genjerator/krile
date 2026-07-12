@@ -1,14 +1,15 @@
 package config
 
 type Config struct {
-	Query   string
-	City    string
-	Output  string
-	Format  string
-	Limit   int
-	Delay   int
-	Verbose bool
-	Debug   bool
+	Query    string
+	City     string
+	Output   string
+	Format   string
+	Limit    int
+	Delay    int
+	Distance int // search radius in meters, 0 = no restriction
+	Verbose  bool
+	Debug    bool
 
 	// PostgreSQL parameters
 	DBHost         string

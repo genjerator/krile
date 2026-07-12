@@ -1,6 +1,7 @@
 package scraper
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,11 +10,17 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/genjerator/krile/internal/parser"
 )
 
 const (
 	ajaxURL   = "https://www.gelbeseiten.de/ajaxsuche"
 	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+	colorReset = "\033[0m"
+	colorRed   = "\033[31m"
+	colorBlue  = "\033[34m"
+	colorCyan  = "\033[36m"
 )
 
 type AjaxResponse struct {
@@ -24,16 +31,22 @@ type AjaxResponse struct {
 }
 
 type Fetcher struct {
-	client  *http.Client
-	verbose bool
-	debug   bool
+	ctx      context.Context
+	client   *http.Client
+	delay    time.Duration
+	distance int
+	verbose  bool
+	debug    bool
 }
 
-func NewFetcher(ctx interface{}, verbose, debug bool) (*Fetcher, error) {
+func NewFetcher(ctx context.Context, verbose, debug bool, delayMs, distance int) (*Fetcher, error) {
 	return &Fetcher{
-		client:  &http.Client{Timeout: 30 * time.Second},
-		verbose: verbose,
-		debug:   debug,
+		ctx:      ctx,
+		client:   &http.Client{Timeout: 30 * time.Second},
+		delay:    time.Duration(delayMs) * time.Millisecond,
+		distance: distance,
+		verbose:  verbose,
+		debug:    debug,
 	}, nil
 }
 
@@ -43,18 +56,26 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 	position := 1
 	const anzahl = 10
 
-	if f.verbose || f.debug {
-		fmt.Fprintf(os.Stderr, "[INFO] %s total results available: fetching...\n", ts())
-	}
-
 	clicks := 0
+	page := 0
 	for {
-		if f.verbose || f.debug {
-			fmt.Fprintf(os.Stderr, "[INFO] %s fetching position=%d\n", ts(), position)
+		if err := f.ctx.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "\n[INFO] interrupted, stopping\n")
+			return nil
+		}
+
+		page++
+		fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d%s (position=%d)\n", colorCyan, page, colorReset, position)
+		if f.debug {
+			fmt.Fprintf(os.Stderr, "[DEBUG] position=%d\n", position)
 		}
 
 		resp, err := f.post(query, city, position, anzahl)
 		if err != nil {
+			if f.ctx.Err() != nil {
+				fmt.Fprintf(os.Stderr, "\n[INFO] interrupted, stopping\n")
+				return nil
+			}
 			return err
 		}
 
@@ -75,17 +96,20 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 		clicks++
 
 		if maxClicks > 0 && clicks >= maxClicks {
-			if f.verbose || f.debug {
-				fmt.Fprintf(os.Stderr, "[INFO] %s reached click limit (%d)\n", ts(), maxClicks)
-			}
+			fmt.Fprintf(os.Stderr, "[INFO] reached page limit after %s%d%s pages\n", colorCyan, page, colorReset)
 			break
 		}
 
 		if resp.AnzahlMehrTreffer == 0 {
-			if f.verbose || f.debug {
-				fmt.Fprintf(os.Stderr, "[INFO] %s no more results\n", ts())
-			}
+			fmt.Fprintf(os.Stderr, "[INFO] no more results after %s%d%s pages\n", colorCyan, page, colorReset)
 			break
+		}
+
+		select {
+		case <-f.ctx.Done():
+			fmt.Fprintf(os.Stderr, "\n[INFO] interrupted, stopping\n")
+			return nil
+		case <-time.After(f.delay):
 		}
 	}
 
@@ -96,8 +120,16 @@ func (f *Fetcher) post(query, city string, position, anzahl int) (*AjaxResponse,
 	var body strings.Builder
 	mw := multipart.NewWriter(&body)
 
+	umkreis := "-1"
+	distance := "0"
+	if f.distance > 0 {
+		umkreis = fmt.Sprintf("%d", f.distance)
+		distance = fmt.Sprintf("%d", f.distance)
+	}
+
 	fields := map[string]string{
-		"umkreis":    "-1",
+		"umkreis":    umkreis,
+		"distance":   distance,
 		"verwandt":   "false",
 		"WAS":        strings.ToLower(query),
 		"WO":         strings.ToLower(city),
@@ -110,7 +142,7 @@ func (f *Fetcher) post(query, city string, position, anzahl int) (*AjaxResponse,
 	}
 	mw.Close()
 
-	req, err := http.NewRequest("POST", ajaxURL, strings.NewReader(body.String()))
+	req, err := http.NewRequestWithContext(f.ctx, "POST", ajaxURL, strings.NewReader(body.String()))
 	if err != nil {
 		return nil, err
 	}
@@ -147,35 +179,65 @@ func (f *Fetcher) post(query, city string, position, anzahl int) (*AjaxResponse,
 	return &result, nil
 }
 
-// FetchDetailPage fetches a single detail page by URL
-func (f *Fetcher) FetchDetailPage(url string) (string, error) {
-	if !strings.HasPrefix(url, "http") {
-		url = "https://www.gelbeseiten.de" + url
+// FetchDetailPage fetches a single gelbeseiten detail page by URL.
+func (f *Fetcher) FetchDetailPage(rawURL string) (string, error) {
+	if !strings.HasPrefix(rawURL, "http") {
+		rawURL = "https://www.gelbeseiten.de" + rawURL
+	}
+	return f.fetchPage(rawURL)
+}
+
+// FindEmailOnWebsite fetches the business website and looks for an email on the
+// homepage first, then on the first contact/impressum page found.
+func (f *Fetcher) FindEmailOnWebsite(websiteURL string) (string, error) {
+	html, err := f.fetchPage(websiteURL)
+	if err != nil {
+		return "", err
 	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	if email := parser.ExtractEmailFromHTML(html); email != "" {
+		return email, nil
+	}
+
+	contactURL := parser.FindContactPageURL(html, websiteURL)
+	if contactURL == "" || contactURL == websiteURL {
+		return "", nil
+	}
+
+	if f.verbose || f.debug {
+		fmt.Fprintf(os.Stderr, "[DEBUG] contact page found: %s\n", contactURL)
+	}
+
+	contactHTML, err := f.fetchPage(contactURL)
+	if err != nil {
+		return "", err
+	}
+
+	return parser.ExtractEmailFromHTML(contactHTML), nil
+}
+
+func (f *Fetcher) fetchPage(rawURL string) (string, error) {
+	req, err := http.NewRequestWithContext(f.ctx, "GET", rawURL, nil)
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-	req.Header.Set("Referer", "https://www.gelbeseiten.de/")
 
 	resp, err := f.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("GET %s: %w", url, err)
+		return "", fmt.Errorf("GET %s: %w", rawURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("detail page returned HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("GET %s: HTTP %d", rawURL, resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
-
 	return string(data), nil
 }
 
