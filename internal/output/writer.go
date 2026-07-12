@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
 	"github.com/genjerator/krile/internal/config"
 	"github.com/genjerator/krile/internal/models"
 )
+
+// exportDir is where output files land unless an explicit path is given.
+const exportDir = "export"
 
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -39,9 +43,18 @@ func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, error) {
 	format := cfg.Format
 	dest := cfg.Output
 
-	if dest == "" && format != "postgres" {
-		dest = autoFilename(cfg.Query, cfg.City, format, cfg.Distance)
-		fmt.Fprintf(os.Stderr, "[INFO] no output file specified, writing to %s\n", dest)
+	if format != "postgres" {
+		if dest == "" {
+			dest = autoFilename(cfg.Query, cfg.City, format, cfg.Distance)
+		}
+		// Place bare filenames in the export directory; explicit paths are kept as-is.
+		if filepath.Dir(dest) == "." {
+			dest = filepath.Join(exportDir, dest)
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return nil, nil, fmt.Errorf("create output directory: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "[INFO] writing output to %s\n", dest)
 	}
 
 	var out io.Writer

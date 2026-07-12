@@ -9,6 +9,8 @@ krile.exe
 # Output files
 *.json
 *.csv
+*.xlsx
+export/
 
 # IDE
 .vscode/
