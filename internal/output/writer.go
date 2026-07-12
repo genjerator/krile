@@ -37,22 +37,40 @@ type Writer interface {
 	Flush() error
 }
 
-// New returns the appropriate Writer for the given format,
-// writing to dest (file path) or stdout if dest is empty.
-func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, error) {
+// resolvePath places bare filenames in the export directory;
+// explicit paths are kept as-is.
+func resolvePath(dest string) string {
+	if filepath.Dir(dest) == "." {
+		return filepath.Join(exportDir, dest)
+	}
+	return dest
+}
+
+// StatsPath returns the path for the run statistics file: same as the
+// output file with a .txt extension, or an auto-named .txt in the export
+// directory when there is no output file (postgres format).
+func StatsPath(cfg config.Config, outputPath string) string {
+	if outputPath != "" {
+		return strings.TrimSuffix(outputPath, filepath.Ext(outputPath)) + ".txt"
+	}
+	return resolvePath(autoFilename(cfg.Query, cfg.City, "txt", cfg.Distance))
+}
+
+// New returns the appropriate Writer for the given format, along with the
+// resolved output file path ("" for postgres).
+func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, string, error) {
 	format := cfg.Format
 	dest := cfg.Output
 
-	if format != "postgres" {
+	if format == "postgres" {
+		dest = ""
+	} else {
 		if dest == "" {
 			dest = autoFilename(cfg.Query, cfg.City, format, cfg.Distance)
 		}
-		// Place bare filenames in the export directory; explicit paths are kept as-is.
-		if filepath.Dir(dest) == "." {
-			dest = filepath.Join(exportDir, dest)
-		}
+		dest = resolvePath(dest)
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return nil, nil, fmt.Errorf("create output directory: %w", err)
+			return nil, nil, "", fmt.Errorf("create output directory: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "[INFO] writing output to %s\n", dest)
 	}
@@ -63,7 +81,7 @@ func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, error) {
 	if format != "postgres" && format != "xlsx" {
 		f, err := os.Create(dest)
 		if err != nil {
-			return nil, nil, fmt.Errorf("open output file: %w", err)
+			return nil, nil, "", fmt.Errorf("open output file: %w", err)
 		}
 		out = f
 		closer = f
@@ -71,11 +89,11 @@ func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, error) {
 
 	switch format {
 	case "csv":
-		return NewCSVWriter(out), closer, nil
+		return NewCSVWriter(out), closer, dest, nil
 	case "json":
-		return NewJSONWriter(out), closer, nil
+		return NewJSONWriter(out), closer, dest, nil
 	case "xlsx":
-		return NewExcelWriter(dest), io.NopCloser(nil), nil
+		return NewExcelWriter(dest), io.NopCloser(nil), dest, nil
 	case "postgres":
 		// Build connection string
 		connString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
@@ -88,10 +106,10 @@ func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, error) {
 
 		pgWriter, err := NewPostgresWriter(ctx, connString, tableName, cfg.UpdateExisting, cfg.Debug)
 		if err != nil {
-			return nil, nil, fmt.Errorf("create postgres writer: %w", err)
+			return nil, nil, "", fmt.Errorf("create postgres writer: %w", err)
 		}
-		return pgWriter, pgWriter, nil
+		return pgWriter, pgWriter, "", nil
 	default:
-		return nil, nil, fmt.Errorf("unknown format %q (want json, csv, xlsx, or postgres)", format)
+		return nil, nil, "", fmt.Errorf("unknown format %q (want json, csv, xlsx, or postgres)", format)
 	}
 }

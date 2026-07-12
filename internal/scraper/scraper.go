@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/genjerator/krile/internal/config"
 	"github.com/genjerator/krile/internal/output"
@@ -11,7 +13,9 @@ import (
 )
 
 func Run(ctx context.Context, cfg config.Config) error {
-	writer, closer, err := output.New(ctx, cfg)
+	start := time.Now()
+
+	writer, closer, outPath, err := output.New(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -148,16 +152,27 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 
 	// Display final summary
+	end := time.Now()
+	elapsed := end.Sub(start)
 	withoutEmail := totalFetched - totalWithEmail
 	emailPct := 0.0
 	if totalFetched > 0 {
 		emailPct = float64(totalWithEmail) / float64(totalFetched) * 100
 	}
+	recordsPerMin := 0.0
+	emailsPerMin := 0.0
+	if minutes := elapsed.Minutes(); minutes > 0 {
+		recordsPerMin = float64(totalFetched) / minutes
+		emailsPerMin = float64(totalWithEmail) / minutes
+	}
 
 	fmt.Fprintf(os.Stderr, "\n─────────────────────────────────────────\n")
+	fmt.Fprintf(os.Stderr, "  Duration:           %s\n", elapsed.Round(time.Second))
 	fmt.Fprintf(os.Stderr, "  Total collected:    %d addresses\n", totalFetched)
+	fmt.Fprintf(os.Stderr, "  Records/minute:     %.1f\n", recordsPerMin)
 	fmt.Fprintf(os.Stderr, "  With email:         %s%d%s\n", colorBlue, totalWithEmail, colorReset)
 	fmt.Fprintf(os.Stderr, "  Unique emails:      %s%d%s\n", colorBlue, len(uniqueEmails), colorReset)
+	fmt.Fprintf(os.Stderr, "  Emails/minute:      %.1f\n", emailsPerMin)
 	fmt.Fprintf(os.Stderr, "  Without email:      %d\n", withoutEmail)
 	fmt.Fprintf(os.Stderr, "  Email coverage:     %s%.1f%%%s\n", colorRed, emailPct, colorReset)
 	if cfg.Format == "postgres" {
@@ -173,5 +188,67 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 	fmt.Fprintf(os.Stderr, "─────────────────────────────────────────\n")
 
+	statsPath := output.StatsPath(cfg, outPath)
+	if err := writeStatsFile(statsPath, cfg, outPath, start, end,
+		totalFetched, totalWithEmail, len(uniqueEmails), written, totalSkipped); err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] could not write stats file: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "[INFO] stats written to %s\n", statsPath)
+	}
+
 	return nil
+}
+
+// writeStatsFile writes a plain-text run report next to the output file.
+func writeStatsFile(path string, cfg config.Config, outPath string, start, end time.Time,
+	totalFetched, totalWithEmail, uniqueEmails, written, skipped int) error {
+
+	elapsed := end.Sub(start)
+	recordsPerMin := 0.0
+	emailsPerMin := 0.0
+	if minutes := elapsed.Minutes(); minutes > 0 {
+		recordsPerMin = float64(totalFetched) / minutes
+		emailsPerMin = float64(totalWithEmail) / minutes
+	}
+	emailPct := 0.0
+	if totalFetched > 0 {
+		emailPct = float64(totalWithEmail) / float64(totalFetched) * 100
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Krile scrape statistics\n")
+	fmt.Fprintf(&b, "=======================\n\n")
+	fmt.Fprintf(&b, "Query:              %s\n", cfg.Query)
+	fmt.Fprintf(&b, "City:               %s\n", cfg.City)
+	if cfg.Distance > 0 {
+		fmt.Fprintf(&b, "Radius:             %d km\n", cfg.Distance/1000)
+	}
+	fmt.Fprintf(&b, "Format:             %s\n", cfg.Format)
+	if outPath != "" {
+		fmt.Fprintf(&b, "Output:             %s\n", outPath)
+	}
+	if cfg.Format == "postgres" {
+		tableName := cfg.DBTable
+		if tableName == "" {
+			tableName = "companies"
+		}
+		fmt.Fprintf(&b, "Table:              %s\n", tableName)
+	}
+	fmt.Fprintf(&b, "\n")
+	fmt.Fprintf(&b, "Started:            %s\n", start.Format(time.RFC3339))
+	fmt.Fprintf(&b, "Finished:           %s\n", end.Format(time.RFC3339))
+	fmt.Fprintf(&b, "Duration:           %s\n", elapsed.Round(time.Second))
+	fmt.Fprintf(&b, "\n")
+	fmt.Fprintf(&b, "Total collected:    %d addresses\n", totalFetched)
+	fmt.Fprintf(&b, "Records/minute:     %.1f\n", recordsPerMin)
+	fmt.Fprintf(&b, "With email:         %d\n", totalWithEmail)
+	fmt.Fprintf(&b, "Unique emails:      %d\n", uniqueEmails)
+	fmt.Fprintf(&b, "Emails/minute:      %.1f\n", emailsPerMin)
+	fmt.Fprintf(&b, "Without email:      %d\n", totalFetched-totalWithEmail)
+	fmt.Fprintf(&b, "Email coverage:     %.1f%%\n", emailPct)
+	if cfg.Format == "postgres" {
+		fmt.Fprintf(&b, "Written to DB:      %d (skipped %d duplicates)\n", written, skipped)
+	}
+
+	return os.WriteFile(path, []byte(b.String()), 0o644)
 }
