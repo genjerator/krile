@@ -35,6 +35,7 @@ func main() {
 	flag.StringVar(&cfg.Query, "query", "", "Business category to search (e.g. \"Restaurant\") [required]")
 	flag.StringVar(&cfg.City, "c", "", "City or location (e.g. \"Berlin\") [required]")
 	flag.StringVar(&cfg.City, "city", "", "City or location (e.g. \"Berlin\") [required]")
+	flag.StringVar(&cfg.ExcelPath, "excel", "", "Excel lookup mode: fill emails for companies in this address export .xlsx")
 	flag.StringVar(&cfg.Output, "o", "", "Output file path (default: auto-named file in export/)")
 	flag.StringVar(&cfg.Output, "output", "", "Output file path (default: auto-named file in export/)")
 	flag.StringVar(&cfg.Format, "f", "json", "Output format: json | csv | xlsx | postgres")
@@ -45,6 +46,9 @@ func main() {
 	flag.IntVar(&cfg.Delay, "delay", 1000, "Delay between requests in milliseconds")
 	flag.IntVar(&cfg.Distance, "r", 0, "Search radius in meters (0 = no restriction, e.g. 50000 = 50km)")
 	flag.IntVar(&cfg.Distance, "radius", 0, "Search radius in meters (0 = no restriction, e.g. 50000 = 50km)")
+	flag.IntVar(&cfg.Workers, "w", 8, "Concurrent workers for email enrichment")
+	flag.IntVar(&cfg.Workers, "workers", 8, "Concurrent workers for email enrichment")
+	flag.BoolVar(&cfg.WebSearch, "websearch", true, "Web-search fallback (DuckDuckGo) to find the company website when no email is found")
 	flag.BoolVar(&cfg.Verbose, "v", false, "Enable verbose logging")
 	flag.BoolVar(&cfg.Verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&cfg.Debug, "debug", false, "Dump raw HTML responses and detailed debug info to stderr")
@@ -64,11 +68,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  -q, --query   string  Business category to search (e.g. \"Restaurant\") [required]\n")
 		fmt.Fprintf(os.Stderr, "  -c, --city    string  City or location (e.g. \"Berlin\") [required]\n")
+		fmt.Fprintf(os.Stderr, "      --excel   string  Excel lookup mode: fill emails for companies in this .xlsx\n")
+		fmt.Fprintf(os.Stderr, "                        (replaces -q/-c; -o = output copy, -l = max companies)\n")
 		fmt.Fprintf(os.Stderr, "  -o, --output  string  Output file path (default: auto-named file in export/)\n")
 		fmt.Fprintf(os.Stderr, "  -f, --format  string  Output format: json | csv | xlsx | postgres (default: json)\n")
 		fmt.Fprintf(os.Stderr, "  -l, --limit   int     Max results to fetch (0 = all)\n")
 		fmt.Fprintf(os.Stderr, "  -d, --delay   int     Delay between requests in ms (default: 1000)\n")
 		fmt.Fprintf(os.Stderr, "  -r, --radius  int     Search radius in meters (0 = no restriction, e.g. 50000 = 50km)\n")
+	fmt.Fprintf(os.Stderr, "  -w, --workers int     Concurrent workers for email enrichment (default: 8)\n")
+	fmt.Fprintf(os.Stderr, "      --websearch       Web-search fallback for missing emails (default: true, disable with --websearch=false)\n")
 		fmt.Fprintf(os.Stderr, "  -v, --verbose         Enable verbose logging\n")
 		fmt.Fprintf(os.Stderr, "      --debug           Dump raw HTML and detailed debug info to stderr\n")
 		fmt.Fprintf(os.Stderr, "      --version         Print version and exit\n")
@@ -90,8 +98,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	if cfg.Query == "" || cfg.City == "" {
-		fmt.Fprintln(os.Stderr, "error: --query and --city are required")
+	if cfg.ExcelPath == "" && (cfg.Query == "" || cfg.City == "") {
+		fmt.Fprintln(os.Stderr, "error: --query and --city are required (or --excel for lookup mode)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -99,7 +107,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := scraper.Run(ctx, cfg); err != nil {
+	var err error
+	if cfg.ExcelPath != "" {
+		err = scraper.RunLookup(ctx, cfg)
+	} else {
+		err = scraper.Run(ctx, cfg)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}

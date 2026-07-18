@@ -54,10 +54,15 @@ func (f *Fetcher) Close() {}
 
 func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(string) error) error {
 	position := 1
-	const anzahl = 10
+	// Request 50 results per page (matches the site's own "1 - 50 von N
+	// Einträgen" page size). Pagination advances by the count actually
+	// returned, so a lower server-side cap still works correctly.
+	const anzahl = 50
 
 	clicks := 0
 	page := 0
+	total := 0
+	totalPages := 0
 	for {
 		if err := f.ctx.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "\n[INFO] interrupted, stopping\n")
@@ -65,7 +70,12 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 		}
 
 		page++
-		fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d%s (position=%d)\n", colorCyan, page, colorReset, position)
+		if totalPages > 0 {
+			fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d/%d%s (position=%d of %d)\n",
+				colorCyan, page, totalPages, colorReset, position, total)
+		} else {
+			fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d%s (position=%d)\n", colorCyan, page, colorReset, position)
+		}
 		if f.debug {
 			fmt.Fprintf(os.Stderr, "[DEBUG] position=%d\n", position)
 		}
@@ -88,15 +98,27 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 			break
 		}
 
+		if page == 1 && resp.GesamtanzahlTreffer > 0 {
+			total = resp.GesamtanzahlTreffer
+			totalPages = (total + resp.AnzahlTreffer - 1) / resp.AnzahlTreffer
+			fmt.Fprintf(os.Stderr, "[INFO] %s%d%s total results (%d per page, %d pages)\n",
+				colorCyan, total, colorReset, resp.AnzahlTreffer, totalPages)
+		}
+
 		if err := onHTML(resp.HTML); err != nil {
 			return err
 		}
 
-		position += anzahl
+		position += resp.AnzahlTreffer
 		clicks++
 
 		if maxClicks > 0 && clicks >= maxClicks {
 			fmt.Fprintf(os.Stderr, "[INFO] reached page limit after %s%d%s pages\n", colorCyan, page, colorReset)
+			break
+		}
+
+		if total > 0 && position > total {
+			fmt.Fprintf(os.Stderr, "[INFO] all %s%d%s results fetched (%d pages)\n", colorCyan, total, colorReset, page)
 			break
 		}
 
@@ -179,6 +201,12 @@ func (f *Fetcher) post(query, city string, position, anzahl int) (*AjaxResponse,
 	return &result, nil
 }
 
+// SearchOnce performs a single ajaxsuche request (first page only) and
+// returns the raw response. Used by the Excel lookup mode.
+func (f *Fetcher) SearchOnce(query, city string, anzahl int) (*AjaxResponse, error) {
+	return f.post(query, city, 1, anzahl)
+}
+
 // FetchDetailPage fetches a single gelbeseiten detail page by URL.
 func (f *Fetcher) FetchDetailPage(rawURL string) (string, error) {
 	if !strings.HasPrefix(rawURL, "http") {
@@ -190,18 +218,27 @@ func (f *Fetcher) FetchDetailPage(rawURL string) (string, error) {
 // FindEmailOnWebsite fetches the business website and looks for an email on the
 // homepage first, then on the first contact/impressum page found.
 func (f *Fetcher) FindEmailOnWebsite(websiteURL string) (string, error) {
+	email, _, err := f.FindEmailAndPages(websiteURL)
+	return email, err
+}
+
+// FindEmailAndPages is like FindEmailOnWebsite but also returns the fetched
+// HTML (homepage plus contact page), so callers can verify the site really
+// belongs to the business.
+func (f *Fetcher) FindEmailAndPages(websiteURL string) (string, string, error) {
 	html, err := f.fetchPage(websiteURL)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	pages := html
 
 	if email := parser.ExtractEmailFromHTML(html); email != "" {
-		return email, nil
+		return email, pages, nil
 	}
 
 	contactURL := parser.FindContactPageURL(html, websiteURL)
 	if contactURL == "" || contactURL == websiteURL {
-		return "", nil
+		return "", pages, nil
 	}
 
 	if f.verbose || f.debug {
@@ -210,10 +247,11 @@ func (f *Fetcher) FindEmailOnWebsite(websiteURL string) (string, error) {
 
 	contactHTML, err := f.fetchPage(contactURL)
 	if err != nil {
-		return "", err
+		return "", pages, err
 	}
+	pages += contactHTML
 
-	return parser.ExtractEmailFromHTML(contactHTML), nil
+	return parser.ExtractEmailFromHTML(contactHTML), pages, nil
 }
 
 func (f *Fetcher) fetchPage(rawURL string) (string, error) {

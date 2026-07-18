@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/genjerator/krile/internal/config"
+	"github.com/genjerator/krile/internal/models"
 	"github.com/genjerator/krile/internal/output"
 	"github.com/genjerator/krile/internal/parser"
 )
@@ -28,11 +30,27 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 	defer fetcher.Close()
 
+	var ws *WebSearcher
+	if cfg.WebSearch {
+		ws = NewWebSearcher(ctx, cfg.Delay, cfg.Debug)
+		defer ws.Close()
+	}
+
 	written := 0
 	totalSkipped := 0
 	totalFetched := 0
 	totalWithEmail := 0
 	uniqueEmails := make(map[string]struct{})
+	var emailMu sync.Mutex
+
+	// recordEmail registers a found email and returns the unique-email
+	// count; safe to call from enrichment workers.
+	recordEmail := func(email string) int {
+		emailMu.Lock()
+		defer emailMu.Unlock()
+		uniqueEmails[email] = struct{}{}
+		return len(uniqueEmails)
+	}
 
 	err = fetcher.FetchPages(cfg.Query, cfg.City, cfg.Limit, func(html string) error {
 		businesses, err := parser.ParseDebug(html, cfg.Debug)
@@ -43,56 +61,9 @@ func Run(ctx context.Context, cfg config.Config) error {
 
 		totalFetched += len(businesses)
 
-		// Try to fetch emails from detail pages for businesses without emails
-		for i := range businesses {
-			if businesses[i].Email == "" && businesses[i].SourceURL != "" {
-				fmt.Fprintf(os.Stderr, "[INFO] %s: No email found in listing, trying to fetch from source URL...\n",
-					businesses[i].Name)
-
-				if cfg.Debug {
-					fmt.Fprintf(os.Stderr, "[DEBUG] fetching detail page for: %s (%s)\n",
-						businesses[i].Name, businesses[i].SourceURL)
-				}
-
-				detailHTML, err := fetcher.FetchDetailPage(businesses[i].SourceURL)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[WARN] %s: Failed to fetch detail page: %v\n",
-						businesses[i].Name, err)
-					continue
-				}
-
-				email := parser.ExtractEmailFromDetailPage(detailHTML)
-				if email != "" {
-					businesses[i].Email = email
-					uniqueEmails[email] = struct{}{}
-					fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on detail page: %s%s%s %s(#%d)%s\n",
-						businesses[i].Name,
-						colorBlue, email, colorReset,
-						colorRed, len(uniqueEmails), colorReset)
-				} else if businesses[i].Website != "" {
-					fmt.Fprintf(os.Stderr, "[INFO] %s: Trying website contact page: %s\n",
-						businesses[i].Name, businesses[i].Website)
-					wsEmail, err := fetcher.FindEmailOnWebsite(businesses[i].Website)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "[WARN] %s: website fetch failed: %v\n",
-							businesses[i].Name, err)
-					} else if wsEmail != "" {
-						businesses[i].Email = wsEmail
-						uniqueEmails[wsEmail] = struct{}{}
-						fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on website: %s%s%s %s(#%d)%s\n",
-							businesses[i].Name,
-							colorBlue, wsEmail, colorReset,
-							colorRed, len(uniqueEmails), colorReset)
-					} else {
-						fmt.Fprintf(os.Stderr, "[INFO] %s: No email found on website either\n",
-							businesses[i].Name)
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "[INFO] %s: No email found, no website available\n",
-						businesses[i].Name)
-				}
-			}
-		}
+		// Fetch emails from detail pages / websites concurrently for
+		// businesses without emails.
+		enrichEmails(ctx, fetcher, ws, businesses, cfg.Workers, cfg.Debug, recordEmail)
 
 		// Count businesses with emails
 		for _, b := range businesses {
@@ -197,6 +168,119 @@ func Run(ctx context.Context, cfg config.Config) error {
 	}
 
 	return nil
+}
+
+// enrichEmails fills in missing emails by fetching detail pages (and
+// business websites as fallback) with a pool of concurrent workers. Each
+// worker owns distinct slice elements, so no locking is needed on
+// businesses; recordEmail must be goroutine-safe.
+func enrichEmails(ctx context.Context, fetcher *Fetcher, ws *WebSearcher, businesses []models.Business,
+	workers int, debug bool, recordEmail func(string) int) {
+
+	if workers <= 0 {
+		workers = 8
+	}
+
+	jobs := make(chan int, len(businesses))
+	for i := range businesses {
+		if businesses[i].Email == "" && businesses[i].SourceURL != "" {
+			jobs <- i
+		}
+	}
+	close(jobs)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				enrichOne(fetcher, ws, &businesses[i], debug, recordEmail)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// enrichOne tries to find an email for a single business: first on its
+// gelbeseiten detail page, then on its own website, finally on a website
+// found via web search.
+func enrichOne(fetcher *Fetcher, ws *WebSearcher, b *models.Business, debug bool, recordEmail func(string) int) {
+	fmt.Fprintf(os.Stderr, "[INFO] %s: No email found in listing, trying to fetch from source URL...\n", b.Name)
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "[DEBUG] fetching detail page for: %s (%s)\n", b.Name, b.SourceURL)
+	}
+
+	detailHTML, err := fetcher.FetchDetailPage(b.SourceURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] %s: Failed to fetch detail page: %v\n", b.Name, err)
+		return
+	}
+
+	email := parser.ExtractEmailFromDetailPage(detailHTML)
+	if email != "" {
+		b.Email = email
+		fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on detail page: %s%s%s %s(#%d)%s\n",
+			b.Name, colorBlue, email, colorReset, colorRed, recordEmail(email), colorReset)
+		return
+	}
+
+	if b.Website != "" {
+		fmt.Fprintf(os.Stderr, "[INFO] %s: Trying website contact page: %s\n", b.Name, b.Website)
+		wsEmail, err := fetcher.FindEmailOnWebsite(b.Website)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[WARN] %s: website fetch failed: %v\n", b.Name, err)
+		} else if wsEmail != "" {
+			b.Email = wsEmail
+			fmt.Fprintf(os.Stderr, "[INFO] %s: Email found on website: %s%s%s %s(#%d)%s\n",
+				b.Name, colorBlue, wsEmail, colorReset, colorRed, recordEmail(wsEmail), colorReset)
+			return
+		}
+	}
+
+	webSearchEmail(fetcher, ws, b, recordEmail)
+}
+
+// webSearchEmail is the last resort: find the company's website via web
+// search and run the email extraction on it.
+func webSearchEmail(fetcher *Fetcher, ws *WebSearcher, b *models.Business, recordEmail func(string) int) {
+	if ws == nil {
+		fmt.Fprintf(os.Stderr, "[INFO] %s: No email found\n", b.Name)
+		return
+	}
+
+	query := strings.TrimSpace(b.Name + " " + b.City)
+	site, err := ws.FindWebsite(query)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] %s: web search failed: %v\n", b.Name, err)
+		return
+	}
+	if site == "" || strings.EqualFold(site, b.Website) {
+		fmt.Fprintf(os.Stderr, "[INFO] %s: No email found, web search has no new website\n", b.Name)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[INFO] %s: Web search found %s, checking for email\n", b.Name, site)
+	email, pages, err := fetcher.FindEmailAndPages(site)
+	if err != nil || email == "" {
+		fmt.Fprintf(os.Stderr, "[INFO] %s: No email on web-search site either\n", b.Name)
+		return
+	}
+	if ok, reason := acceptWebEmail(email, site, b.Name, b.Phone, b.PostalCode, pages); !ok {
+		fmt.Fprintf(os.Stderr, "[INFO] %s: Rejected %s from %s — %s\n", b.Name, email, site, reason)
+		return
+	}
+
+	b.Email = email
+	if b.Website == "" {
+		b.Website = site
+	}
+	fmt.Fprintf(os.Stderr, "[INFO] %s: Email found via web search: %s%s%s %s(#%d)%s\n",
+		b.Name, colorBlue, email, colorReset, colorRed, recordEmail(email), colorReset)
 }
 
 // writeStatsFile writes a plain-text run report next to the output file.
