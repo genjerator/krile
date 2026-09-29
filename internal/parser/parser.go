@@ -6,12 +6,31 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/genjerator/krile/internal/models"
 )
+
+// Obfuscated-email handling: sites hide addresses from scrapers by writing the
+// "@" as "(at)" / "[at]" / " at " and sometimes the "." as "(dot)"/"(punkt)".
+var (
+	atObfuscation  = regexp.MustCompile(`(?i)\s*(?:\(|\[|\{)\s*(?:at|ät)\s*(?:\)|\]|\})\s*|&#0*64;`)
+	dotObfuscation = regexp.MustCompile(`(?i)\s*(?:\(|\[|\{)\s*(?:dot|punkt)\s*(?:\)|\]|\})\s*|&#0*46;`)
+	emailPattern   = regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}`)
+)
+
+// extractObfuscatedEmail de-obfuscates common "(at)"/"(dot)" spellings in a
+// snippet of text and returns the first address that then looks like an email,
+// e.g. "info ( at ) chin-imbiss.de" -> "info@chin-imbiss.de". Returns "" when
+// no plausible address is present.
+func extractObfuscatedEmail(text string) string {
+	norm := atObfuscation.ReplaceAllString(text, "@")
+	norm = dotObfuscation.ReplaceAllString(norm, ".")
+	return emailPattern.FindString(norm)
+}
 
 func Parse(html string) ([]models.Business, error) {
 	return ParseDebug(html, false)
@@ -97,6 +116,17 @@ func ExtractEmailFromDetailPage(html string) string {
 					return
 				}
 			}
+		})
+	}
+
+	// 4. Look for obfuscated emails like "info ( at ) chin-imbiss.de"
+	if email == "" {
+		doc.Find(".text, .kontaktdaten, .contact-info, p, span, div, a, li, td").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+			if e := extractObfuscatedEmail(s.Text()); e != "" {
+				email = e
+				return false
+			}
+			return true
 		})
 	}
 

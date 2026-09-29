@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -52,8 +53,7 @@ func NewFetcher(ctx context.Context, verbose, debug bool, delayMs, distance int)
 
 func (f *Fetcher) Close() {}
 
-func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(string) error) error {
-	position := 1
+func (f *Fetcher) FetchPages(query, city string, maxClicks, startPosition, startPage int, onHTML func(string) error) error {
 	// Request 50 results per page (matches the site's own "1 - 50 von N
 	// Einträgen" page size). Pagination advances by the count actually
 	// returned, so a lower server-side cap still works correctly.
@@ -61,8 +61,32 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 
 	clicks := 0
 	page := 0
+	pageSize := 0
 	total := 0
 	totalPages := 0
+
+	position := 1
+	switch {
+	case startPosition > 1:
+		position = startPosition
+		fmt.Fprintf(os.Stderr, "[INFO] resuming from position=%s%d%s\n", colorCyan, position, colorReset)
+	case startPage > 1:
+		// Convert a page number to a result position. The page size isn't
+		// known until the server answers, so probe page 1 once (its results
+		// are not processed) to learn it, then jump to the requested page.
+		probe, err := f.post(query, city, 1, anzahl)
+		if err != nil {
+			return err
+		}
+		if probe.AnzahlTreffer > 0 {
+			pageSize = probe.AnzahlTreffer
+			total = probe.GesamtanzahlTreffer
+			totalPages = (total + pageSize - 1) / pageSize
+			position = (startPage-1)*pageSize + 1
+			fmt.Fprintf(os.Stderr, "[INFO] resuming from page %s%d/%d%s (position=%d, %d results/page)\n",
+				colorCyan, startPage, totalPages, colorReset, position, pageSize)
+		}
+	}
 	for {
 		if err := f.ctx.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "\n[INFO] interrupted, stopping\n")
@@ -70,11 +94,17 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 		}
 
 		page++
+		// Display the absolute page (derived from position) once the real
+		// page size is known, so a resumed run shows the true page number.
+		displayPage := page
+		if pageSize > 0 {
+			displayPage = (position-1)/pageSize + 1
+		}
 		if totalPages > 0 {
 			fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d/%d%s (position=%d of %d)\n",
-				colorCyan, page, totalPages, colorReset, position, total)
+				colorCyan, displayPage, totalPages, colorReset, position, total)
 		} else {
-			fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d%s (position=%d)\n", colorCyan, page, colorReset, position)
+			fmt.Fprintf(os.Stderr, "[INFO] fetching page %s%d%s (position=%d)\n", colorCyan, displayPage, colorReset, position)
 		}
 		if f.debug {
 			fmt.Fprintf(os.Stderr, "[DEBUG] position=%d\n", position)
@@ -98,8 +128,9 @@ func (f *Fetcher) FetchPages(query, city string, maxClicks int, onHTML func(stri
 			break
 		}
 
-		if page == 1 && resp.GesamtanzahlTreffer > 0 {
+		if totalPages == 0 && resp.GesamtanzahlTreffer > 0 {
 			total = resp.GesamtanzahlTreffer
+			pageSize = resp.AnzahlTreffer
 			totalPages = (total + resp.AnzahlTreffer - 1) / resp.AnzahlTreffer
 			fmt.Fprintf(os.Stderr, "[INFO] %s%d%s total results (%d per page, %d pages)\n",
 				colorCyan, total, colorReset, resp.AnzahlTreffer, totalPages)
@@ -222,36 +253,80 @@ func (f *Fetcher) FindEmailOnWebsite(websiteURL string) (string, error) {
 	return email, err
 }
 
+// commonContactPaths are contact/imprint pages to probe directly when the
+// homepage neither carries an email nor links to a contact page. German and
+// English variants, with and without a .html suffix.
+var commonContactPaths = []string{
+	"/kontakt", "/kontakt/", "/kontakt.html", "/kontakt.php",
+	"/contact", "/contact/", "/contact.html", "/contact.php",
+	"/impressum", "/impressum/", "/impressum.html", "/impressum.php",
+	"/datenschutz", "/datenschutz/", "/datenschutz.html", "/datenschutz.php",
+}
+
+// commonContactURLs returns absolute contact-page guesses at the site root.
+func commonContactURLs(websiteURL string) []string {
+	u, err := url.Parse(websiteURL)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	root := u.Scheme + "://" + u.Host
+	out := make([]string, 0, len(commonContactPaths))
+	for _, p := range commonContactPaths {
+		out = append(out, root+p)
+	}
+	return out
+}
+
 // FindEmailAndPages is like FindEmailOnWebsite but also returns the fetched
 // HTML (homepage plus contact page), so callers can verify the site really
-// belongs to the business.
+// belongs to the business. Order: homepage → contact page linked from the
+// homepage → common guessed contact/imprint URLs (/kontakt, /contact, …).
 func (f *Fetcher) FindEmailAndPages(websiteURL string) (string, string, error) {
 	html, err := f.fetchPage(websiteURL)
 	if err != nil {
 		return "", "", err
 	}
 	pages := html
+	tried := map[string]bool{websiteURL: true}
 
 	if email := parser.ExtractEmailFromHTML(html); email != "" {
 		return email, pages, nil
 	}
 
-	contactURL := parser.FindContactPageURL(html, websiteURL)
-	if contactURL == "" || contactURL == websiteURL {
-		return "", pages, nil
+	// 1. Contact page linked from the homepage.
+	if contactURL := parser.FindContactPageURL(html, websiteURL); contactURL != "" && !tried[contactURL] {
+		tried[contactURL] = true
+		if f.verbose || f.debug {
+			fmt.Fprintf(os.Stderr, "[DEBUG] contact page found: %s\n", contactURL)
+		}
+		if contactHTML, err := f.fetchPage(contactURL); err == nil {
+			pages += contactHTML
+			if email := parser.ExtractEmailFromHTML(contactHTML); email != "" {
+				return email, pages, nil
+			}
+		}
 	}
 
-	if f.verbose || f.debug {
-		fmt.Fprintf(os.Stderr, "[DEBUG] contact page found: %s\n", contactURL)
+	// 2. Guess common contact/imprint URLs even when the homepage has no link.
+	for _, guess := range commonContactURLs(websiteURL) {
+		if tried[guess] {
+			continue
+		}
+		tried[guess] = true
+		guessHTML, err := f.fetchPage(guess)
+		if err != nil {
+			continue // 404 / not present — try the next candidate
+		}
+		pages += guessHTML
+		if email := parser.ExtractEmailFromHTML(guessHTML); email != "" {
+			if f.verbose || f.debug {
+				fmt.Fprintf(os.Stderr, "[DEBUG] email found on guessed contact page: %s\n", guess)
+			}
+			return email, pages, nil
+		}
 	}
 
-	contactHTML, err := f.fetchPage(contactURL)
-	if err != nil {
-		return "", pages, err
-	}
-	pages += contactHTML
-
-	return parser.ExtractEmailFromHTML(contactHTML), pages, nil
+	return "", pages, nil
 }
 
 func (f *Fetcher) fetchPage(rawURL string) (string, error) {

@@ -309,7 +309,7 @@ func lookupOne(ctx context.Context, f *Fetcher, ws *WebSearcher, delay time.Dura
 	// the email extraction on it.
 	if res.Email == "" && ws != nil {
 		query := strings.TrimSpace(lookup.CleanFirma(c.Firma) + " " + where)
-		site, err := ws.FindWebsite(query)
+		site, err := ws.FindWebsite(query, lookup.CleanFirma(c.Firma))
 		switch {
 		case err != nil:
 			if ctx.Err() != nil {

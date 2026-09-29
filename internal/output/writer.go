@@ -16,6 +16,19 @@ import (
 // exportDir is where output files land unless an explicit path is given.
 const exportDir = "export"
 
+// PostgresConnString builds a libpq/pgx connection string from the config.
+// The password key is only included when set: a bare "password= " (empty
+// value) makes libpq/pgx mis-parse the rest of the string and silently drop
+// dbname, so it is omitted for trust-auth (empty-password) setups.
+func PostgresConnString(cfg config.Config) string {
+	s := fmt.Sprintf("host=%s port=%d user=%s dbname=%s sslmode=disable",
+		cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBName)
+	if cfg.DBPassword != "" {
+		s += fmt.Sprintf(" password=%s", cfg.DBPassword)
+	}
+	return s
+}
+
 var nonAlnum = regexp.MustCompile(`[^a-z0-9]+`)
 
 func autoFilename(query, city, format string, distanceM int) string {
@@ -95,9 +108,7 @@ func New(ctx context.Context, cfg config.Config) (Writer, io.Closer, string, err
 	case "xlsx":
 		return NewExcelWriter(dest), io.NopCloser(nil), dest, nil
 	case "postgres":
-		// Build connection string
-		connString := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			cfg.DBHost, cfg.DBPort, cfg.DBUser, cfg.DBPassword, cfg.DBName)
+		connString := PostgresConnString(cfg)
 
 		tableName := cfg.DBTable
 		if tableName == "" {

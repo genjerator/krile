@@ -52,7 +52,7 @@ func Run(ctx context.Context, cfg config.Config) error {
 		return len(uniqueEmails)
 	}
 
-	err = fetcher.FetchPages(cfg.Query, cfg.City, cfg.Limit, func(html string) error {
+	err = fetcher.FetchPages(cfg.Query, cfg.City, cfg.Limit, cfg.StartPosition, cfg.StartPage, func(html string) error {
 		businesses, err := parser.ParseDebug(html, cfg.Debug)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[WARN] %s parse error: %v\n", ts(), err)
@@ -254,7 +254,7 @@ func webSearchEmail(fetcher *Fetcher, ws *WebSearcher, b *models.Business, recor
 	}
 
 	query := strings.TrimSpace(b.Name + " " + b.City)
-	site, err := ws.FindWebsite(query)
+	site, err := ws.FindWebsite(query, b.Name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[WARN] %s: web search failed: %v\n", b.Name, err)
 		return

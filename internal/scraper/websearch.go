@@ -46,19 +46,63 @@ func isBlockedHost(host string) bool {
 	return false
 }
 
-// pickResult returns the first candidate URL whose host is not a known
-// directory/social page — the best guess for the company's own website.
-func pickResult(hrefs []string) string {
+// registrableLabel returns the second-level label of a host — the part that
+// usually carries the brand ("mariahilf-hotel" of "www.mariahilf-hotel.at").
+// This lets a company-name match ignore aggregator subdomains such as
+// "ibis-wien-mariahilf.meinhotel.top", whose brand token sits in a subdomain
+// rather than the registrable domain.
+func registrableLabel(host string) string {
+	host = strings.TrimPrefix(strings.ToLower(host), "www.")
+	labels := strings.Split(host, ".")
+	if len(labels) >= 2 {
+		return labels[len(labels)-2]
+	}
+	return host
+}
+
+// pickResult chooses the best candidate URL for a company's own website.
+// Directory/social hosts are always skipped; among the rest it prefers, in
+// order: (1) a result whose registrable domain contains a distinctive token of
+// the company name (the official site, even when it ranks below aggregators),
+// (2) a result whose host contains such a token anywhere, (3) the first
+// non-blocked result (previous behaviour). Returns "" when nothing qualifies.
+func pickResult(hrefs []string, companyName string) string {
+	toks := distinctiveTokens(companyName)
+	var domainMatch, hostMatch, firstValid string
 	for _, h := range hrefs {
 		u, err := url.Parse(h)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			continue
 		}
-		if !isBlockedHost(u.Hostname()) {
-			return h
+		host := u.Hostname()
+		if isBlockedHost(host) {
+			continue
+		}
+		if firstValid == "" {
+			firstValid = h
+		}
+		sld := registrableLabel(host)
+		lowHost := strings.ToLower(host)
+		for _, t := range toks {
+			if strings.Contains(sld, t) {
+				if domainMatch == "" {
+					domainMatch = h
+				}
+			} else if strings.Contains(lowHost, t) {
+				if hostMatch == "" {
+					hostMatch = h
+				}
+			}
 		}
 	}
-	return ""
+	switch {
+	case domainMatch != "":
+		return domainMatch
+	case hostMatch != "":
+		return hostMatch
+	default:
+		return firstValid
+	}
 }
 
 // freemailDomains are consumer mail providers commonly used by small German
@@ -234,10 +278,11 @@ func (w *WebSearcher) Close() {
 	w.cancels = nil
 }
 
-// FindWebsite searches DuckDuckGo for query and returns the first organic
-// result that is not a known directory/social page. Returns "" without
+// FindWebsite searches DuckDuckGo for query and returns the best organic
+// result for the company's own website (see pickResult); companyName steers
+// the choice toward a domain matching the company name. Returns "" without
 // error when nothing suitable is found.
-func (w *WebSearcher) FindWebsite(query string) (string, error) {
+func (w *WebSearcher) FindWebsite(query, companyName string) (string, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -259,7 +304,7 @@ func (w *WebSearcher) FindWebsite(query string) (string, error) {
 			if w.debug {
 				fmt.Fprintf(os.Stderr, "[DEBUG] web search %q: %d results (plain)\n", query, len(hrefs))
 			}
-			return pickResult(hrefs), nil
+			return pickResult(hrefs, companyName), nil
 		}
 		if w.parent.Err() != nil {
 			return "", err
@@ -275,7 +320,7 @@ func (w *WebSearcher) FindWebsite(query string) (string, error) {
 	if w.debug {
 		fmt.Fprintf(os.Stderr, "[DEBUG] web search %q: %d results (chrome)\n", query, len(hrefs))
 	}
-	return pickResult(hrefs), nil
+	return pickResult(hrefs, companyName), nil
 }
 
 // plainSearch queries DuckDuckGo's HTML endpoint with a simple GET and
